@@ -210,7 +210,7 @@ def translate_items(items: list[Item]) -> None:
         return
     source_items = [{"id": index, "title": item.title, "summary": item.summary} for index, item in enumerate(items)]
     body = {
-        "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        "model": os.getenv("OPENAI_MODEL") or "gpt-4o-mini",
         "store": False,
         "instructions": "你是中文科技简报编辑。把给定的英文标题和摘要翻译并压缩成自然、准确、易懂的简体中文。不要添加原文没有的事实。只返回 JSON 数组，每项字段必须是 id、title_zh、summary_zh。摘要最多两句话。",
         "input": json.dumps(source_items, ensure_ascii=False),

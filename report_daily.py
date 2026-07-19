@@ -9,9 +9,9 @@ import re
 import smtplib
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
-from email.utils import format_datetime
+from email.utils import format_datetime, parsedate_to_datetime
 from html.parser import HTMLParser
 from typing import Iterable
 from urllib.parse import quote_plus
@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 TIMEOUT = int(os.getenv("FETCH_TIMEOUT", "20"))
+LOOKBACK_HOURS = int(os.getenv("NEWS_LOOKBACK_HOURS", "48"))
 USER_AGENT = "daily-ai-research-report/2.0 (+https://github.com/YifangYang1203/report)"
 
 
@@ -37,11 +38,12 @@ class Item:
     summary: str
     source: str
     published: str = ""
+    published_at: datetime | None = None
     score: int = 0
 
 
 def chinese_news(query: str) -> str:
-    return "https://news.google.com/rss/search?q=" + quote_plus(query) + "&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+    return "https://news.google.com/rss/search?q=" + quote_plus(query) + "+when%3A2d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
 
 
 TOPICS = {
@@ -123,6 +125,19 @@ def child_text(node: ET.Element, names: Iterable[str]) -> str:
     return ""
 
 
+def parse_published(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(timezone.utc)
+
+
 def fetch_url(url: str, headers: dict[str, str] | None = None) -> bytes:
     request = Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
     with urlopen(request, timeout=TIMEOUT) as response:
@@ -144,21 +159,27 @@ def feed_items(source: Source) -> list[Item]:
                 if child.tag.rsplit("}", 1)[-1].lower() == "link" and child.attrib.get("href"):
                     link = child.attrib["href"]
                     break
-        published = clean_text(child_text(node, {"pubdate", "published", "updated", "date"}), 40)
-        if title and link:
-            result.append(Item("", title, link.strip(), summary, source.name, published))
+        published = clean_text(child_text(node, {"pubdate", "published", "updated", "date"}), 80)
+        published_at = parse_published(published)
+        if title and link and published_at:
+            result.append(Item("", title, link.strip(), summary, source.name, published, published_at))
     return result
 
 
 def github_items(source: Source) -> list[Item]:
     import json
     payload = json.loads(fetch_url(source.url, {"Accept": "application/vnd.github+json"}))
-    return [Item("", clean_text(repo.get("full_name", ""), 180), repo.get("html_url", ""), clean_text(repo.get("description", "")) or "近期更新的开源项目，可进一步查看 README、示例和许可证。", source.name, repo.get("updated_at", "")) for repo in payload.get("items", [])[:30]]
+    return [Item("", clean_text(repo.get("full_name", ""), 180), repo.get("html_url", ""), clean_text(repo.get("description", "")) or "近期更新的开源项目，可进一步查看 README、示例和许可证。", source.name, repo.get("updated_at", ""), parse_published(repo.get("updated_at", ""))) for repo in payload.get("items", [])[:30]]
 
 
 def relevance(item: Item, terms: tuple[str, ...]) -> int:
     haystack = f"{item.title} {item.summary}".lower()
     return sum(2 if term.lower() in item.title.lower() else 1 for term in terms if term.lower() in haystack)
+
+
+def is_low_value_title(title: str) -> bool:
+    blocked = ("登录", "注册", "广告", "招聘", "优惠", "抽奖", "转载授权", "免责声明")
+    return any(token in title for token in blocked)
 
 
 def collect_topic(topic: str, config: dict, per_topic: int = 4) -> list[Item]:
@@ -168,8 +189,13 @@ def collect_topic(topic: str, config: dict, per_topic: int = 4) -> list[Item]:
         try:
             fetched = github_items(source) if source.kind == "github" else feed_items(source)
             for item in fetched:
+                if not item.published_at or item.published_at < datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS):
+                    continue
+                if is_low_value_title(item.title):
+                    continue
                 item.topic = topic
-                item.score = relevance(item, config["terms"])
+                age_hours = max(0.0, (datetime.now(timezone.utc) - item.published_at).total_seconds() / 3600)
+                item.score = relevance(item, config["terms"]) * 10 + max(0, int(LOOKBACK_HOURS - age_hours))
                 if item.score > 0:
                     candidates.append(item)
         except Exception as exc:
@@ -177,8 +203,8 @@ def collect_topic(topic: str, config: dict, per_topic: int = 4) -> list[Item]:
     result: list[Item] = []
     seen_urls: set[str] = set()
     seen_titles: set[str] = set()
-    for item in sorted(candidates, key=lambda x: (x.score, x.published), reverse=True):
-        title_key = re.sub(r"[^a-z0-9]+", "", item.title.lower())
+    for item in sorted(candidates, key=lambda x: (x.score, x.published_at or datetime.min.replace(tzinfo=timezone.utc)), reverse=True):
+        title_key = re.sub(r"\W+", "", item.title.lower(), flags=re.UNICODE)
         if item.url not in seen_urls and title_key not in seen_titles:
             result.append(item)
             seen_urls.add(item.url)

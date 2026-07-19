@@ -29,4 +29,4 @@ SMTP_FROM       发件地址，通常与 SMTP_USER 相同
 REPORT_TO       接收简报的邮箱地址
 ```
 
-工作流每天 UTC 23:30 运行，即北京时间 07:30；也可以在 Actions 页面用 `workflow_dispatch` 手动测试。邮件包含纯文本和 HTML 两个版本，正文就是整理后的简报，不再只是链接清单。
+工作流每天 UTC 23:30 运行，即北京时间 07:30；也可以在 Actions 页面用 `workflow_dispatch` 手动测试。邮件包含纯文本和 HTML 两个版本，正文就是整理后的中文简报，不再只是链接清单。

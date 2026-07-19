@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import html
-import json
 import os
 import re
 import smtplib
@@ -15,6 +14,7 @@ from email.message import EmailMessage
 from email.utils import format_datetime
 from html.parser import HTMLParser
 from typing import Iterable
+from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
@@ -40,54 +40,57 @@ class Item:
     score: int = 0
 
 
+def chinese_news(query: str) -> str:
+    return "https://news.google.com/rss/search?q=" + quote_plus(query) + "&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+
+
 TOPICS = {
     "Codex": {
-        "description": "OpenAI Codex 的官方更新、发布和工程实践",
-        "terms": ("codex", "agent", "coding", "软件工程", "开发者"),
+        "description": "中文媒体报道的 OpenAI Codex、编程智能体和开发者实践",
+        "terms": ("codex", "代码智能体", "编程", "开发者", "软件工程"),
         "sources": (
-            Source("OpenAI Codex Releases", "https://github.com/openai/codex/releases.atom"),
-            Source("OpenAI News", "https://openai.com/news/rss.xml"),
+            Source("中文科技资讯", chinese_news("OpenAI Codex 编程 智能体")),
+            Source("机器之心", "https://www.jiqizhixin.com/rss"),
         ),
     },
     "ChatGPT": {
-        "description": "ChatGPT 的官方功能、模型、工作流和使用方法",
-        "terms": ("chatgpt", "gpt-", "model", "memory", "deep research", "openai"),
+        "description": "中文媒体报道的 ChatGPT 功能、模型和使用方法",
+        "terms": ("chatgpt", "gpt", "人工智能", "模型", "智能助手", "openai"),
         "sources": (
-            Source("OpenAI News", "https://openai.com/news/rss.xml"),
-            Source("OpenAI Cookbook", "https://github.com/openai/openai-cookbook/releases.atom"),
+            Source("中文 AI 资讯", chinese_news("ChatGPT 更新 功能 使用方法")),
+            Source("量子位", "https://www.qbitai.com/feed"),
         ),
     },
     "Google": {
-        "description": "Google、Gemini、Google Research 和开发者产品的重点更新",
-        "terms": ("google", "gemini", "deepmind", "android", "cloud", "research"),
+        "description": "中文媒体报道的 Google、Gemini 和 Google Research 动态",
+        "terms": ("google", "谷歌", "gemini", "deepmind", "人工智能", "大模型"),
         "sources": (
-            Source("Google AI Blog", "https://blog.google/technology/ai/rss/"),
-            Source("Google Research", "https://research.google/blog/rss/"),
+            Source("中文 Google AI 资讯", chinese_news("Google Gemini 谷歌 人工智能")),
+            Source("机器之心", "https://www.jiqizhixin.com/rss"),
         ),
     },
     "常用 Skills": {
-        "description": "可直接复用的 AI skills、智能体工具和自动化工作流",
-        "terms": ("skill", "agent", "mcp", "automation", "workflow", "copilot"),
+        "description": "中文媒体介绍的 AI Skills、MCP、智能体和自动化工作流",
+        "terms": ("skill", "技能", "agent", "智能体", "mcp", "工作流", "自动化"),
         "sources": (
-            Source("GitHub AI repositories", "https://api.github.com/search/repositories?q=topic%3Aai+OR+topic%3Amcp+OR+topic%3Aagent&sort=updated&order=desc&per_page=20", "github"),
-            Source("Hugging Face Blog", "https://huggingface.co/blog/feed.xml"),
+            Source("中文 AI 工具资讯", chinese_news("AI Agent MCP Skills 工作流 教程")),
+            Source("少数派", "https://sspai.com/feed"),
         ),
     },
     "数学建模": {
-        "description": "数学建模、优化、仿真、数据分析和竞赛中可落地的工具",
-        "terms": ("optimization", "simulation", "modeling", "mathematical", "科学计算", "solver", "forecast"),
+        "description": "中文来源中的数学建模、优化、仿真和科学计算工具",
+        "terms": ("数学建模", "建模", "优化", "仿真", "科学计算", "求解器", "预测", "数据分析"),
         "sources": (
-            Source("arXiv AI/ML", "https://export.arxiv.org/rss/cs.LG"),
-            Source("GitHub modeling repositories", "https://api.github.com/search/repositories?q=mathematical+modeling+OR+optimization+OR+simulation&sort=updated&order=desc&per_page=20", "github"),
+            Source("中文数学建模资讯", chinese_news("数学建模 工具 优化 仿真 科学计算")),
+            Source("中文数据分析资讯", chinese_news("Python 数据分析 数学建模 求解器")),
         ),
     },
     "科研工具": {
-        "description": "文献检索、论文阅读、数据分析、可重复研究和科研协作工具",
-        "terms": ("research", "scientific", "paper", "dataset", "reproduc", "literature", "科研", "scholar"),
+        "description": "中文来源中的文献检索、论文阅读、数据分析和科研协作工具",
+        "terms": ("科研", "论文", "文献", "数据集", "学术", "研究", "实验", "工具"),
         "sources": (
-            Source("Nature Methods", "https://www.nature.com/nmeth.rss"),
-            Source("Papers with Code", "https://paperswithcode.com/feeds/latest"),
-            Source("arXiv Research", "https://export.arxiv.org/rss/cs.DL"),
+            Source("中文科研工具资讯", chinese_news("科研工具 文献 论文 数据分析")),
+            Source("中文科研资讯", chinese_news("科研 AI 工具 论文阅读")),
         ),
     },
 }
@@ -190,64 +193,12 @@ def collect_topic(topic: str, config: dict, per_topic: int = 4) -> list[Item]:
     return result
 
 
-def _response_text(payload: dict) -> str:
-    if payload.get("output_text"):
-        return str(payload["output_text"])
-    parts: list[str] = []
-    for output in payload.get("output", []):
-        for content in output.get("content", []):
-            if content.get("type") == "output_text":
-                parts.append(content.get("text", ""))
-    return "\n".join(parts)
-
-
-def translate_items(items: list[Item]) -> None:
-    """Translate titles and summaries in one API call so the email is Chinese."""
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        if "--send" in sys.argv[1:] and os.getenv("REQUIRE_CHINESE", "1") == "1":
-            raise RuntimeError("要发送中文简报，请配置 OPENAI_API_KEY；它与 SMTP_PASSWORD 是两项不同的密钥。")
-        return
-    source_items = [{"id": index, "title": item.title, "summary": item.summary} for index, item in enumerate(items)]
-    body = {
-        "model": os.getenv("OPENAI_MODEL") or "gpt-4o-mini",
-        "store": False,
-        "instructions": "你是中文科技简报编辑。把给定的英文标题和摘要翻译并压缩成自然、准确、易懂的简体中文。不要添加原文没有的事实。只返回 JSON 数组，每项字段必须是 id、title_zh、summary_zh。摘要最多两句话。",
-        "input": json.dumps(source_items, ensure_ascii=False),
-    }
-    request = Request(
-        "https://api.openai.com/v1/responses",
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": USER_AGENT},
-        method="POST",
-    )
-    try:
-        with urlopen(request, timeout=60) as response:
-            payload = json.loads(response.read())
-        text = _response_text(payload).strip()
-        match = re.search(r"\[[\s\S]*\]", text)
-        translated = json.loads(match.group(0) if match else text)
-        by_id = {int(entry["id"]): entry for entry in translated}
-        for index, item in enumerate(items):
-            entry = by_id.get(index)
-            if entry:
-                item.title = clean_text(str(entry.get("title_zh", item.title)), 180)
-                item.summary = clean_text(str(entry.get("summary_zh", item.summary)))
-    except Exception as exc:
-        if os.getenv("REQUIRE_CHINESE", "1") == "1":
-            raise RuntimeError(f"中文翻译失败，已停止发送以避免发出英文简报：{exc}") from exc
-        print(f"Chinese translation skipped: {exc}")
-
-
 def build_report(when: datetime, per_topic: int = 4) -> str:
     lines = ["# 每日 AI / 科研工具简报", f"生成时间：{when.astimezone().strftime('%Y-%m-%d %H:%M %Z')}", "", "本简报只保留与指定主题直接相关的内容；每条均含一句摘要，链接仅作为原文核验入口。", ""]
-    all_items: list[Item] = []
     topic_items: list[tuple[str, dict, list[Item]]] = []
     for topic, config in TOPICS.items():
         items = collect_topic(topic, config, per_topic)
-        all_items.extend(items)
         topic_items.append((topic, config, items))
-    translate_items(all_items)
     for topic, config, items in topic_items:
         lines.extend([f"## {topic}", config["description"], ""])
         for index, item in enumerate(items, 1):

@@ -1,54 +1,32 @@
-# Daily AI / Research Report
+# 每日 AI / 科研工具简报
 
-这个仓库会每天生成一份包含以下主题内容的日报：
-- codex
-- chatgpt
-- Google
-- 常用的 skills
-- 数学建模好用的东西
-- 科研工具推荐
+每天自动采集并发送一封中文简报，固定覆盖：Codex、ChatGPT、Google/Gemini、常用 AI skills、数学建模工具、科研工具推荐。
 
-每个主题抓取 3 条公开结果，并整理为 Markdown 报告。
+## 这版解决的问题
 
-## 运行方式
+旧版只搜索 Twitter/X，容易得到账号主页、登录页和广告，而且没有摘要。新版使用官方博客、RSS、GitHub API 和 arXiv 等可核验来源；每个主题先做关键词相关性筛选、去重，再输出“标题 + 一句话摘要 + 原文入口”。没有可靠结果时会明确写“本轮暂无可靠更新”，不会用无关链接凑数。
 
-生成日报：
+## 本地运行
 
 ```bash
-python3 report_daily.py
+python -m pip install -r requirements.txt
+python report_daily.py
+python report_daily.py --send
 ```
 
-生成并发送邮件：
+默认每个主题最多 4 条，可用 `ITEMS_PER_TOPIC=3` 调整。单个来源失败不会让其他主题消失；邮件配置不完整时程序会直接失败，避免误以为已经发送。
 
-```bash
-python3 report_daily.py --send
+## GitHub Actions 配置
+
+在仓库 Settings → Secrets and variables → Actions 中配置：
+
+```text
+SMTP_HOST       邮箱 SMTP 服务器，例如 smtp.qq.com
+SMTP_PORT       通常为 587
+SMTP_USER       发件邮箱账号
+SMTP_PASSWORD   SMTP 授权码，不是网页登录密码
+SMTP_FROM       发件地址，通常与 SMTP_USER 相同
+REPORT_TO       接收简报的邮箱地址
 ```
 
-## 配置邮件发送
-
-在运行前设置下面这些环境变量：
-
-```bash
-export SMTP_HOST='smtp.example.com'
-export SMTP_PORT='587'
-export SMTP_USER='your@example.com'
-export SMTP_PASSWORD='your-password'
-export SMTP_FROM='your@example.com'
-export REPORT_TO='recipient@example.com'
-```
-
-然后执行：
-
-```bash
-python3 report_daily.py --send
-```
-
-## 定时执行
-
-如果你的环境支持 cron，可以加入下面这条任务，让它每天早上 7:30 自动执行：
-
-```bash
-30 7 * * * /workspaces/report/run_daily_report.sh >> /workspaces/report/cron.log 2>&1
-```
-
-如果你希望我继续把它改成直接支持 Gmail/Outlook/163 等常见邮箱服务的版本，我也可以继续补上。
+工作流每天 UTC 23:30 运行，即北京时间 07:30；也可以在 Actions 页面用 `workflow_dispatch` 手动测试。邮件包含纯文本和 HTML 两个版本，正文就是整理后的简报，不再只是链接清单。

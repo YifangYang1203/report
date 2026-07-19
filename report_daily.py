@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 import re
 import smtplib
@@ -189,10 +190,65 @@ def collect_topic(topic: str, config: dict, per_topic: int = 4) -> list[Item]:
     return result
 
 
+def _response_text(payload: dict) -> str:
+    if payload.get("output_text"):
+        return str(payload["output_text"])
+    parts: list[str] = []
+    for output in payload.get("output", []):
+        for content in output.get("content", []):
+            if content.get("type") == "output_text":
+                parts.append(content.get("text", ""))
+    return "\n".join(parts)
+
+
+def translate_items(items: list[Item]) -> None:
+    """Translate titles and summaries in one API call so the email is Chinese."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        if "--send" in sys.argv[1:] and os.getenv("REQUIRE_CHINESE", "1") == "1":
+            raise RuntimeError("要发送中文简报，请配置 OPENAI_API_KEY；它与 SMTP_PASSWORD 是两项不同的密钥。")
+        return
+    source_items = [{"id": index, "title": item.title, "summary": item.summary} for index, item in enumerate(items)]
+    body = {
+        "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        "store": False,
+        "instructions": "你是中文科技简报编辑。把给定的英文标题和摘要翻译并压缩成自然、准确、易懂的简体中文。不要添加原文没有的事实。只返回 JSON 数组，每项字段必须是 id、title_zh、summary_zh。摘要最多两句话。",
+        "input": json.dumps(source_items, ensure_ascii=False),
+    }
+    request = Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": USER_AGENT},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=60) as response:
+            payload = json.loads(response.read())
+        text = _response_text(payload).strip()
+        match = re.search(r"\[[\s\S]*\]", text)
+        translated = json.loads(match.group(0) if match else text)
+        by_id = {int(entry["id"]): entry for entry in translated}
+        for index, item in enumerate(items):
+            entry = by_id.get(index)
+            if entry:
+                item.title = clean_text(str(entry.get("title_zh", item.title)), 180)
+                item.summary = clean_text(str(entry.get("summary_zh", item.summary)))
+    except Exception as exc:
+        if os.getenv("REQUIRE_CHINESE", "1") == "1":
+            raise RuntimeError(f"中文翻译失败，已停止发送以避免发出英文简报：{exc}") from exc
+        print(f"Chinese translation skipped: {exc}")
+
+
 def build_report(when: datetime, per_topic: int = 4) -> str:
     lines = ["# 每日 AI / 科研工具简报", f"生成时间：{when.astimezone().strftime('%Y-%m-%d %H:%M %Z')}", "", "本简报只保留与指定主题直接相关的内容；每条均含一句摘要，链接仅作为原文核验入口。", ""]
+    all_items: list[Item] = []
+    topic_items: list[tuple[str, dict, list[Item]]] = []
     for topic, config in TOPICS.items():
         items = collect_topic(topic, config, per_topic)
+        all_items.extend(items)
+        topic_items.append((topic, config, items))
+    translate_items(all_items)
+    for topic, config, items in topic_items:
         lines.extend([f"## {topic}", config["description"], ""])
         for index, item in enumerate(items, 1):
             line = f"{index}. **{item.title}**\n   - 摘要：{item.summary}"

@@ -14,7 +14,7 @@ python report_daily.py
 python report_daily.py --send
 ```
 
-默认每个主题最多 4 条，可用 `ITEMS_PER_TOPIC=3` 调整。单个来源失败不会让其他主题消失；邮件配置不完整时程序会直接失败，避免误以为已经发送。
+默认每个主题最多 4 条，只接受最近 48 小时且带发布时间的内容，并按相关性和新鲜度排序；可用 `ITEMS_PER_TOPIC=3` 或 `NEWS_LOOKBACK_HOURS=24` 调整。单个来源失败不会让其他主题消失，找不到近期可靠内容时会明确显示暂无，不会拿旧闻凑数；邮件配置不完整时程序会直接失败，避免误以为已经发送。
 
 ## GitHub Actions 配置
 

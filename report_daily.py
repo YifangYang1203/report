@@ -1,171 +1,224 @@
 #!/usr/bin/env python3
+"""Generate a focused Chinese daily brief and optionally send it by email."""
+
+from __future__ import annotations
+
+import html
 import os
 import re
-import sys
 import smtplib
+import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
-from typing import List, Tuple
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from email.utils import format_datetime
+from html.parser import HTMLParser
+from typing import Iterable
+from urllib.request import Request, urlopen
+import xml.etree.ElementTree as ET
 
-import requests
+TIMEOUT = int(os.getenv("FETCH_TIMEOUT", "20"))
+USER_AGENT = "daily-ai-research-report/2.0 (+https://github.com/YifangYang1203/report)"
 
 
-BASE_URL = "https://r.jina.ai/http://https://html.duckduckgo.com/html/?q="
-TOPICS = [
-    {
-        "title": "codex",
-        "query": 'site:twitter.com codex',
-        "description": "Codex-related X/Twitter public mentions",
+@dataclass(frozen=True)
+class Source:
+    name: str
+    url: str
+    kind: str = "feed"
+
+
+@dataclass
+class Item:
+    topic: str
+    title: str
+    url: str
+    summary: str
+    source: str
+    published: str = ""
+    score: int = 0
+
+
+TOPICS = {
+    "Codex": {
+        "description": "OpenAI Codex 的官方更新、发布和工程实践",
+        "terms": ("codex", "agent", "coding", "软件工程", "开发者"),
+        "sources": (
+            Source("OpenAI Codex Releases", "https://github.com/openai/codex/releases.atom"),
+            Source("OpenAI News", "https://openai.com/news/rss.xml"),
+        ),
     },
-    {
-        "title": "chatgpt",
-        "query": 'site:twitter.com chatgpt',
-        "description": "ChatGPT-related X/Twitter public mentions",
+    "ChatGPT": {
+        "description": "ChatGPT 的官方功能、模型、工作流和使用方法",
+        "terms": ("chatgpt", "gpt-", "model", "memory", "deep research", "openai"),
+        "sources": (
+            Source("OpenAI News", "https://openai.com/news/rss.xml"),
+            Source("OpenAI Cookbook", "https://github.com/openai/openai-cookbook/releases.atom"),
+        ),
     },
-    {
-        "title": "Google",
-        "query": 'site:twitter.com Google',
-        "description": "Google-related X/Twitter public mentions",
+    "Google": {
+        "description": "Google、Gemini、Google Research 和开发者产品的重点更新",
+        "terms": ("google", "gemini", "deepmind", "android", "cloud", "research"),
+        "sources": (
+            Source("Google AI Blog", "https://blog.google/technology/ai/rss/"),
+            Source("Google Research", "https://research.google/blog/rss/"),
+        ),
     },
-    {
-        "title": "常用的 skills",
-        "query": 'site:twitter.com "AI skills"',
-        "description": "Common AI skill discussions and learning resources",
+    "常用 Skills": {
+        "description": "可直接复用的 AI skills、智能体工具和自动化工作流",
+        "terms": ("skill", "agent", "mcp", "automation", "workflow", "copilot"),
+        "sources": (
+            Source("GitHub AI repositories", "https://api.github.com/search/repositories?q=topic%3Aai+OR+topic%3Amcp+OR+topic%3Aagent&sort=updated&order=desc&per_page=20", "github"),
+            Source("Hugging Face Blog", "https://huggingface.co/blog/feed.xml"),
+        ),
     },
-    {
-        "title": "数学建模好用的东西",
-        "query": 'site:twitter.com "数学建模" 工具',
-        "description": "Useful tools and methods for mathematical modeling",
+    "数学建模": {
+        "description": "数学建模、优化、仿真、数据分析和竞赛中可落地的工具",
+        "terms": ("optimization", "simulation", "modeling", "mathematical", "科学计算", "solver", "forecast"),
+        "sources": (
+            Source("arXiv AI/ML", "https://export.arxiv.org/rss/cs.LG"),
+            Source("GitHub modeling repositories", "https://api.github.com/search/repositories?q=mathematical+modeling+OR+optimization+OR+simulation&sort=updated&order=desc&per_page=20", "github"),
+        ),
     },
-    {
-        "title": "科研工具推荐",
-        "query": 'site:twitter.com "科研工具" 推荐',
-        "description": "Research tools and workflow recommendations",
+    "科研工具": {
+        "description": "文献检索、论文阅读、数据分析、可重复研究和科研协作工具",
+        "terms": ("research", "scientific", "paper", "dataset", "reproduc", "literature", "科研", "scholar"),
+        "sources": (
+            Source("Nature Methods", "https://www.nature.com/nmeth.rss"),
+            Source("Papers with Code", "https://paperswithcode.com/feeds/latest"),
+            Source("arXiv Research", "https://export.arxiv.org/rss/cs.DL"),
+        ),
     },
-]
+}
 
 
-def build_search_url(query: str) -> str:
-    return f"{BASE_URL}{quote(query)}"
+class _HTMLText(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+    def text(self) -> str:
+        return " ".join(self.parts)
 
 
-def decode_duckduckgo_url(raw_url: str) -> str:
-    if not raw_url:
-        return raw_url
-    if raw_url.startswith("https://duckduckgo.com/l/?uddg="):
-        parsed = urlparse(raw_url)
-        values = parse_qs(parsed.query).get("uddg", [])
-        if values:
-            return unquote(values[0])
-    return raw_url
+def clean_text(value: str, limit: int = 360) -> str:
+    parser = _HTMLText()
+    parser.feed(html.unescape(value or ""))
+    text = re.sub(r"\s+", " ", parser.text()).strip()
+    text = re.sub(r"^\s*(摘要|description|summary)\s*[:：-]\s*", "", text, flags=re.I)
+    return text if len(text) <= limit else text[: limit - 1].rsplit(" ", 1)[0] + "…"
 
 
-def is_relevant_twitter_result(title: str, url: str) -> bool:
-    if not url.startswith("http"):
-        return False
-    parsed = urlparse(url)
-    host = parsed.netloc.lower()
-    if "twitter.com" not in host and "x.com" not in host:
-        return False
-    title_lower = title.lower()
-    blocked_tokens = [
-        "log in",
-        "sign in",
-        "robots.txt",
-        "developer platform",
-        "blog.twitter.com",
-        "support.twitter.com",
-        "help.twitter.com",
-        "about.twitter.com",
-        "privacy",
-        "terms",
-        "twitter. it's what's happening",
-    ]
-    if any(token in title_lower for token in blocked_tokens):
-        return False
-    if any(token in url.lower() for token in ["/login", "/i/flow", "/robots.txt", "/help", "/support", "/privacy", "/terms"]):
-        return False
-    return True
+def child_text(node: ET.Element, names: Iterable[str]) -> str:
+    for child in list(node):
+        if child.tag.rsplit("}", 1)[-1].lower() in names:
+            return "".join(child.itertext()).strip()
+    return ""
 
 
-def extract_results(text: str, limit: int = 3) -> List[Tuple[str, str]]:
-    results: List[Tuple[str, str]] = []
-    seen = set()
-    patterns = [
-        r'^\s*## \[(.*?)\]\((https?://.*?)\)\s*$',
-        r'^\s*### \[(.*?)\]\((https?://.*?)\)\s*$',
-        r'^\s*# \[(.*?)\]\((https?://.*?)\)\s*$',
-    ]
-    for pattern in patterns:
-        for match in re.finditer(pattern, text, re.MULTILINE):
-            title = re.sub(r'\s+', ' ', match.group(1)).strip()
-            url = decode_duckduckgo_url(match.group(2).strip())
-            title = title.replace("\u00a0", " ")
-            if not is_relevant_twitter_result(title, url):
-                continue
-            if url in seen:
-                continue
-            seen.add(url)
-            results.append((title, url))
-            if len(results) >= limit:
-                return results
-    # Fallback: capture the first few markdown links that are not internal DuckDuckGo links
-    if not results:
-        for match in re.finditer(r'\[(.*?)\]\((https?://[^)]+)\)', text):
-            title = re.sub(r'\s+', ' ', match.group(1)).strip()
-            url = decode_duckduckgo_url(match.group(2).strip())
-            if url.startswith("https://duckduckgo.com") or url.startswith("https://html.duckduckgo.com"):
-                continue
-            if not is_relevant_twitter_result(title, url):
-                continue
-            if url in seen:
-                continue
-            seen.add(url)
-            results.append((title, url))
-            if len(results) >= limit:
-                break
-    return results
+def fetch_url(url: str, headers: dict[str, str] | None = None) -> bytes:
+    request = Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
+    with urlopen(request, timeout=TIMEOUT) as response:
+        return response.read()
 
 
-def fetch_query_results(query: str, limit: int = 3) -> List[Tuple[str, str]]:
-    url = build_search_url(query)
-    try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-    except Exception as exc:
-        return [(f"Fetch error: {exc}", "")]
-    content = response.text
-    return extract_results(content, limit=limit)
+def feed_items(source: Source) -> list[Item]:
+    root = ET.fromstring(fetch_url(source.url))
+    nodes = [node for node in root.iter() if node.tag.rsplit("}", 1)[-1].lower() in {"item", "entry"}]
+    result: list[Item] = []
+    for node in nodes[:30]:
+        title = clean_text(child_text(node, {"title"}), 180)
+        summary = clean_text(child_text(node, {"description", "summary", "content", "encoded"}))
+        if not summary:
+            summary = f"来自 {source.name} 的最新条目，建议打开原文确认具体更新内容。"
+        link = child_text(node, {"link"})
+        if not link:
+            for child in list(node):
+                if child.tag.rsplit("}", 1)[-1].lower() == "link" and child.attrib.get("href"):
+                    link = child.attrib["href"]
+                    break
+        published = clean_text(child_text(node, {"pubdate", "published", "updated", "date"}), 40)
+        if title and link:
+            result.append(Item("", title, link.strip(), summary, source.name, published))
+    return result
 
 
-def build_report(when: datetime) -> str:
-    lines = []
-    lines.append(f"# Daily AI / Research Report")
-    lines.append(f"Generated at: {when.strftime('%Y-%m-%d %H:%M:%S %Z')}\n")
-    for item in TOPICS:
-        lines.append(f"## {item['title']}")
-        lines.append(f"- 主题说明：{item['description']}")
-        results = fetch_query_results(item['query'], limit=3)
-        for idx, (title, url) in enumerate(results, start=1):
-            display = title if title else "公开结果"
-            if url:
-                lines.append(f"{idx}. [{display}]({url})")
-            else:
-                lines.append(f"{idx}. {display}")
-        lines.append("")
+def github_items(source: Source) -> list[Item]:
+    import json
+    payload = json.loads(fetch_url(source.url, {"Accept": "application/vnd.github+json"}))
+    return [Item("", clean_text(repo.get("full_name", ""), 180), repo.get("html_url", ""), clean_text(repo.get("description", "")) or "近期更新的开源项目，可进一步查看 README、示例和许可证。", source.name, repo.get("updated_at", "")) for repo in payload.get("items", [])[:30]]
+
+
+def relevance(item: Item, terms: tuple[str, ...]) -> int:
+    haystack = f"{item.title} {item.summary}".lower()
+    return sum(2 if term.lower() in item.title.lower() else 1 for term in terms if term.lower() in haystack)
+
+
+def collect_topic(topic: str, config: dict, per_topic: int = 4) -> list[Item]:
+    candidates: list[Item] = []
+    errors: list[str] = []
+    for source in config["sources"]:
+        try:
+            fetched = github_items(source) if source.kind == "github" else feed_items(source)
+            for item in fetched:
+                item.topic = topic
+                item.score = relevance(item, config["terms"])
+                if item.score > 0:
+                    candidates.append(item)
+        except Exception as exc:
+            errors.append(f"{source.name}: {exc}")
+    result: list[Item] = []
+    seen_urls: set[str] = set()
+    seen_titles: set[str] = set()
+    for item in sorted(candidates, key=lambda x: (x.score, x.published), reverse=True):
+        title_key = re.sub(r"[^a-z0-9]+", "", item.title.lower())
+        if item.url not in seen_urls and title_key not in seen_titles:
+            result.append(item)
+            seen_urls.add(item.url)
+            seen_titles.add(title_key)
+        if len(result) >= per_topic:
+            break
+    if not result:
+        note = "本轮没有找到通过主题筛选的可靠新内容，已跳过无关链接。"
+        if errors:
+            note += " 来源暂时不可用：" + "; ".join(errors[:2])
+        result.append(Item(topic, "本轮暂无可靠更新", "", note, "筛选器"))
+    return result
+
+
+def build_report(when: datetime, per_topic: int = 4) -> str:
+    lines = ["# 每日 AI / 科研工具简报", f"生成时间：{when.astimezone().strftime('%Y-%m-%d %H:%M %Z')}", "", "本简报只保留与指定主题直接相关的内容；每条均含一句摘要，链接仅作为原文核验入口。", ""]
+    for topic, config in TOPICS.items():
+        items = collect_topic(topic, config, per_topic)
+        lines.extend([f"## {topic}", config["description"], ""])
+        for index, item in enumerate(items, 1):
+            line = f"{index}. **{item.title}**\n   - 摘要：{item.summary}"
+            if item.url:
+                line += f"\n   - 原文：{item.url}"
+            lines.extend([line, ""])
     return "\n".join(lines).strip() + "\n"
+
+
+def markdown_to_html(report: str) -> str:
+    escaped = html.escape(report)
+    escaped = re.sub(r"^### (.+)$", r"<h3>\1</h3>", escaped, flags=re.M)
+    escaped = re.sub(r"^## (.+)$", r"<h2>\1</h2>", escaped, flags=re.M)
+    escaped = re.sub(r"^# (.+)$", r"<h1>\1</h1>", escaped, flags=re.M)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"(https?://[^\s<]+)", r'<a href="\1">\1</a>', escaped)
+    return "<html><body style='font-family:Arial,sans-serif;line-height:1.65;max-width:900px'>" + escaped.replace("\n\n", "<br><br>").replace("\n", "<br>") + "</body></html>"
 
 
 def save_report(report_text: str, stamp: str) -> str:
     output_dir = os.path.join(os.path.dirname(__file__), "reports")
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f"{stamp}.md")
-    with open(output_path, "w", encoding="utf-8") as fh:
-        fh.write(report_text)
-    latest_path = os.path.join(output_dir, "latest.md")
-    with open(latest_path, "w", encoding="utf-8") as fh:
-        fh.write(report_text)
+    for path in (output_path, os.path.join(output_dir, "latest.md")):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(report_text)
     return output_path
 
 
@@ -176,18 +229,19 @@ def send_email(report_text: str, stamp: str) -> None:
     smtp_password = os.getenv("SMTP_PASSWORD")
     from_addr = os.getenv("SMTP_FROM") or smtp_user
     to_addr = os.getenv("REPORT_TO") or os.getenv("SMTP_TO")
-    if not (smtp_host and smtp_user and smtp_password and from_addr and to_addr):
-        print("SMTP settings are incomplete; report was saved locally only.")
-        return
-
+    if not all((smtp_host, smtp_user, smtp_password, from_addr, to_addr)):
+        raise RuntimeError("SMTP_HOST/SMTP_USER/SMTP_PASSWORD/SMTP_FROM/REPORT_TO 未配置，拒绝假装发送。")
     msg = EmailMessage()
+    msg["Subject"] = f"每日 AI / 科研工具简报｜{stamp}"
+    msg["From"], msg["To"] = from_addr, to_addr
+    msg["Date"] = format_datetime(datetime.now(timezone.utc))
     msg.set_content(report_text)
-    msg["Subject"] = f"Daily AI / Research Report {stamp}"
-    msg["From"] = from_addr
-    msg["To"] = to_addr
-    with smtplib.SMTP(smtp_host, smtp_port) as server:
+    msg.add_alternative(markdown_to_html(report_text), subtype="html")
+    with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
         server.ehlo()
-        server.starttls()
+        if smtp_port != 25:
+            server.starttls()
+            server.ehlo()
         server.login(smtp_user, smtp_password)
         server.send_message(msg)
     print(f"Email sent to {to_addr}")
@@ -196,13 +250,11 @@ def send_email(report_text: str, stamp: str) -> None:
 def main() -> int:
     when = datetime.now(timezone.utc)
     stamp = when.strftime("%Y-%m-%d")
-    report_text = build_report(when)
+    report_text = build_report(when, int(os.getenv("ITEMS_PER_TOPIC", "4")))
     output_path = save_report(report_text, stamp)
     print(f"Report saved to {output_path}")
-    if len(sys.argv) > 1 and sys.argv[1] == "--send":
+    if "--send" in sys.argv[1:]:
         send_email(report_text, stamp)
-    else:
-        print("Use --send to email the report.")
     return 0
 
 
